@@ -14,7 +14,8 @@
     "prisma:studio": "prisma studio",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:migrate:cloud": "ts-node scripts/sync-cloud.ts",
-    "db:sync": "npm run prisma:migrate && npm run prisma:migrate:cloud"
+    "db:sync": "npm run prisma:migrate && npm run prisma:migrate:cloud",
+    "postinstall": "prisma generate"
   },
   "dependencies": {
     "@prisma/client": "^5.18.0",
