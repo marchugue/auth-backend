@@ -1,0 +1,64 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model User {
+  id       String  @id @default(uuid())
+  email    String  @unique
+  password String
+  name     String?
+  role     Role    @default(USER)
+
+  isEmailVerified         Boolean   @default(false)
+  emailVerificationToken  String?
+  emailVerificationExpiry DateTime?
+
+  passwordResetToken  String?
+  passwordResetExpiry DateTime?
+
+  sessions Session[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}
+
+// Each row represents one logged-in device/browser session. The refresh JWT
+// embeds this row's id; the token itself is stored here only as a SHA-256
+// hash so a leaked database never exposes usable tokens. Deleting a row
+// revokes that session immediately.
+model Session {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshToken String
+  userAgent    String?
+  ipAddress    String?
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model SyncOutbox {
+  id        String   @id @default(uuid())
+  tableName String
+  operation String   // 'upsert' | 'delete'
+  payload   Json
+  createdAt DateTime @default(now())
+
+  @@map("sync_outbox")
+}
