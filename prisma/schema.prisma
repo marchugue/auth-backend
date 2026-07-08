@@ -3,8 +3,8 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
 }
 
@@ -13,8 +13,74 @@ enum Role {
   ADMIN
 }
 
+enum BusinessMemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+  READONLY
+}
+
+enum DeviceType {
+  DESKTOP
+  MOBILE
+  POS
+  WEB
+}
+
+enum ExpenseType {
+  MONTHLY
+  DAILY
+}
+
+enum SyncBatchStatus {
+  PROCESSING
+  COMPLETED
+  PARTIAL
+  FAILED
+}
+
+enum SyncOperationType {
+  CREATE
+  UPDATE
+  DELETE
+}
+
+enum SyncOperationStatus {
+  APPLIED
+  CONFLICT
+  REJECTED
+  SKIPPED
+}
+
+enum ConflictResolutionStrategy {
+  LWW
+  SERVER_WINS
+  CLIENT_WINS
+  MERGE
+  MANUAL
+}
+
+enum ConflictResolutionStatus {
+  OPEN
+  RESOLVED
+  DISCARDED
+}
+
+enum SyncLogAction {
+  DEVICE_REGISTERED
+  DEVICE_UPDATED
+  DEVICE_REVOKED
+  SYNC_PUSH
+  SYNC_PULL
+  SYNC_BATCH_COMPLETED
+  SYNC_BATCH_FAILED
+  CONFLICT_DETECTED
+  CONFLICT_RESOLVED
+}
+
 model User {
   id       String  @id @default(uuid())
+  username String  @unique
   email    String  @unique
   password String
   name     String?
@@ -27,7 +93,13 @@ model User {
   passwordResetToken  String?
   passwordResetExpiry DateTime?
 
-  sessions Session[]
+  sessions         Session[]
+  businessMembers  BusinessMember[]
+  devices          Device[]
+  syncBatches      SyncBatch[]
+  syncConflicts    SyncConflict[]    @relation("ConflictReporter")
+  resolvedConflicts SyncConflict[]   @relation("ConflictResolver")
+  syncLogs         SyncLog[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -35,10 +107,6 @@ model User {
   @@map("users")
 }
 
-// Each row represents one logged-in device/browser session. The refresh JWT
-// embeds this row's id; the token itself is stored here only as a SHA-256
-// hash so a leaked database never exposes usable tokens. Deleting a row
-// revokes that session immediately.
 model Session {
   id           String   @id @default(uuid())
   userId       String
@@ -49,6 +117,8 @@ model Session {
   expiresAt    DateTime
   createdAt    DateTime @default(now())
 
+  devices Device[]
+
   @@index([userId])
   @@map("sessions")
 }
@@ -56,9 +126,371 @@ model Session {
 model SyncOutbox {
   id        String   @id @default(uuid())
   tableName String
-  operation String   // 'upsert' | 'delete'
+  operation String
   payload   Json
   createdAt DateTime @default(now())
 
   @@map("sync_outbox")
+}
+
+// ---------- Offline sync infrastructure ----------
+
+model Business {
+  id        String   @id @default(uuid())
+  name      String
+  deletedAt DateTime?
+
+  members       BusinessMember[]
+  devices       Device[]
+  syncBatches   SyncBatch[]
+  syncRecords   SyncRecord[]
+  syncChangeLog SyncChangeLog[]
+  syncConflicts SyncConflict[]
+  syncCheckpoints SyncCheckpoint[]
+  syncLogs      SyncLog[]
+  products            Product[]
+  dailyCogsEntries    DailyCogsEntry[]
+  dailyRevenueEntries DailyRevenueEntry[]
+  utilities           Utility[]
+  expenseCategories  ExpenseCategory[]
+  expenses            Expense[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([deletedAt])
+  @@map("businesses")
+}
+
+model BusinessMember {
+  id         String             @id @default(uuid())
+  businessId String
+  business   Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role       BusinessMemberRole @default(MEMBER)
+  deletedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([businessId, userId])
+  @@index([userId])
+  @@map("business_members")
+}
+
+model Device {
+  id          String     @id
+  businessId  String
+  business    Business   @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionId   String?
+  session     Session?   @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  deviceName  String?
+  deviceType  DeviceType @default(DESKTOP)
+  platform    String?
+  appVersion  String?
+  lastSyncAt  DateTime?
+  lastSeenAt  DateTime?
+  isRevoked   Boolean    @default(false)
+  deletedAt   DateTime?
+
+  syncBatches       SyncBatch[]
+  syncCheckpoints   SyncCheckpoint[]
+  appliedMutations  AppliedMutation[]
+  syncConflicts     SyncConflict[]
+  syncLogs          SyncLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([businessId, id])
+  @@index([businessId])
+  @@index([userId])
+  @@index([businessId, lastSyncAt])
+  @@map("devices")
+}
+
+model SyncBatch {
+  id                 String          @id @default(uuid())
+  idempotencyKey     String
+  deviceId           String
+  device             Device          @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  businessId         String
+  business           Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId             String
+  user               User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status             SyncBatchStatus @default(PROCESSING)
+  operationCount     Int             @default(0)
+  appliedCount       Int             @default(0)
+  conflictCount      Int             @default(0)
+  errorCount         Int             @default(0)
+  requestPayloadHash String?
+  responseSnapshot   Json?
+  startedAt          DateTime        @default(now())
+  completedAt        DateTime?
+
+  operations SyncOperation[]
+  syncLogs   SyncLog[]
+
+  @@unique([deviceId, idempotencyKey])
+  @@index([businessId, deviceId, startedAt(sort: Desc)])
+  @@index([status])
+  @@map("sync_batches")
+}
+
+model SyncOperation {
+  id               String              @id @default(uuid())
+  batchId          String
+  batch            SyncBatch           @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  clientMutationId String
+  entityType       String
+  entityId         String
+  operation        SyncOperationType
+  baseVersion      BigInt?
+  payload          Json?
+  status           SyncOperationStatus
+  serverVersion    BigInt?
+  errorCode        String?
+  createdAt        DateTime            @default(now())
+
+  @@unique([batchId, clientMutationId])
+  @@index([entityType, entityId])
+  @@index([batchId])
+  @@map("sync_operations")
+}
+
+model AppliedMutation {
+  deviceId         String
+  device           Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  clientMutationId String
+  batchId          String
+  appliedAt        DateTime @default(now())
+
+  @@id([deviceId, clientMutationId])
+  @@map("applied_mutations")
+}
+
+model SyncRecord {
+  id                   String    @id @default(uuid())
+  businessId           String
+  business             Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  entityType           String
+  entityId             String
+  payload              Json
+  version              BigInt    @default(1)
+  deletedAt            DateTime?
+  lastModifiedByDevice String?
+  lastModifiedByUser   String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@unique([businessId, entityType, entityId])
+  @@index([businessId, entityType, updatedAt])
+  @@index([businessId, deletedAt])
+  @@map("sync_records")
+}
+
+model SyncChangeLog {
+  id         BigInt            @id @default(autoincrement())
+  businessId String
+  business   Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  entityType String
+  entityId   String
+  operation  SyncOperationType
+  version    BigInt
+  payload    Json?
+  deviceId   String?
+  userId     String?
+  changedAt  DateTime          @default(now())
+
+  @@index([businessId, id])
+  @@map("sync_change_log")
+}
+
+model SyncCheckpoint {
+  id            String   @id @default(uuid())
+  deviceId      String
+  device        Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  businessId    String
+  business      Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  entityType    String   @default("")
+  cursor        String   @default("0")
+  serverVersion BigInt   @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([deviceId, entityType])
+  @@index([businessId])
+  @@map("sync_checkpoints")
+}
+
+model SyncConflict {
+  id                  String                      @id @default(uuid())
+  businessId          String
+  business            Business                    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  entityType          String
+  entityId            String
+  deviceId            String
+  device              Device                      @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  userId              String
+  user                User                        @relation("ConflictReporter", fields: [userId], references: [id], onDelete: Cascade)
+  clientMutationId    String
+  serverVersion       BigInt
+  clientBaseVersion   BigInt?
+  clientPayload       Json
+  serverSnapshot      Json
+  resolutionStrategy  ConflictResolutionStrategy?
+  resolutionStatus    ConflictResolutionStatus    @default(OPEN)
+  resolvedPayload     Json?
+  resolvedByUserId    String?
+  resolvedByUser      User?                       @relation("ConflictResolver", fields: [resolvedByUserId], references: [id], onDelete: SetNull)
+  resolvedAt          DateTime?
+  deletedAt           DateTime?
+  createdAt           DateTime                    @default(now())
+
+  @@index([businessId, resolutionStatus])
+  @@index([entityType, entityId])
+  @@map("sync_conflicts")
+}
+
+model SyncLog {
+  id         String        @id @default(uuid())
+  businessId String
+  business   Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId     String?
+  user       User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  deviceId   String?
+  device     Device?       @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  batchId    String?
+  batch      SyncBatch?    @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  action     SyncLogAction
+  entityType String?
+  entityId   String?
+  metadata   Json          @default("{}")
+  ipAddress  String?
+  createdAt  DateTime      @default(now())
+
+  @@index([businessId, createdAt(sort: Desc)])
+  @@index([batchId])
+  @@map("sync_logs")
+}
+
+// ---------- Sales tracking ----------
+
+model Product {
+  id         String    @id @default(uuid())
+  businessId String
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name       String
+  deletedAt  DateTime?
+
+  revenueEntries DailyRevenueEntry[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId])
+  @@index([businessId, deletedAt])
+  @@map("products")
+}
+
+model DailyCogsEntry {
+  id          String   @id @default(uuid())
+  businessId  String
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  entryDate   DateTime @db.Date
+  productItem String
+  quantity    Decimal  @db.Decimal(12, 4)
+  uom         String
+  cost        Decimal  @db.Decimal(12, 2)
+  deletedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, entryDate])
+  @@index([businessId, deletedAt])
+  @@map("daily_cogs_entries")
+}
+
+model DailyRevenueEntry {
+  id            String   @id @default(uuid())
+  businessId    String
+  business      Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  entryDate     DateTime @db.Date
+  productId     String
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  revenueAmount Decimal  @db.Decimal(12, 2)
+  deletedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, entryDate])
+  @@index([productId])
+  @@index([businessId, deletedAt])
+  @@map("daily_revenue_entries")
+}
+
+model Utility {
+  id          String   @id @default(uuid())
+  businessId  String
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  utilityName String
+  monthlyCost Decimal  @db.Decimal(12, 2)
+  month       Int
+  year        Int
+  deletedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([businessId, utilityName, month, year])
+  @@index([businessId, year, month])
+  @@index([businessId, deletedAt])
+  @@map("utilities")
+}
+
+model ExpenseCategory {
+  id          String   @id @default(uuid())
+  businessId  String
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  deletedAt   DateTime?
+
+  expenses Expense[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([businessId, name])
+  @@index([businessId, deletedAt])
+  @@map("expense_categories")
+}
+
+model Expense {
+  id          String   @id @default(uuid())
+  businessId  String
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  categoryId  String
+  category    ExpenseCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  expenseDate DateTime @db.Date
+  expenseType ExpenseType @default(MONTHLY)
+
+  description String?
+  amount      Decimal  @db.Decimal(12, 2)
+  deletedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, expenseDate])
+  @@index([categoryId])
+  @@index([businessId, deletedAt])
+  @@map("expenses")
 }

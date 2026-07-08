@@ -9,11 +9,19 @@ import apiRouter from './app/index';
 import { notFoundHandler, errorHandler } from './app/middleware/error.middleware';
 
 const app: Express = express();
+const allowedOrigins = [env.clientUrl, 'http://localhost:5173', 'http://127.0.0.1:5173'].filter(Boolean);
 
 app.use(helmet());
 app.use(
   cors({
-    origin: env.clientUrl,
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(null, false);
+    },
     credentials: true, // required so the browser sends/receives the refresh-token cookie
   })
 );

@@ -1,17 +1,12 @@
-import { hashPassword, comparePassword, generateSecureToken, hashToken } from '../../utils/hash';
+import { hashPassword, comparePassword, hashToken } from '../../utils/hash';
 import { signAccessToken, signRefreshToken, verifyRefreshToken } from '../../utils/jwt';
 import { parseDurationToMs } from '../../utils/duration';
-import { sendVerificationEmail, sendPasswordResetEmail } from '../../utils/mailer';
 import { env } from '../../config/env';
 import { ApiError } from '../../utils/ApiError';
 import {
-  findUserByEmail,
+  findUserByUsername,
   findUserById,
-  findUserByVerificationToken,
-  findUserByResetToken,
   createUser,
-  updateUser,
-  resetPasswordAndRevokeSessions,
 } from '../models/user.model';
 import {
   createSessionRecord,
@@ -23,15 +18,10 @@ import {
 import {
   RegisterInput,
   LoginInput,
-  ForgotPasswordInput,
-  ResetPasswordInput,
-  VerifyEmailInput,
-  ResendVerificationInput,
   PublicUser,
 } from '../types/auth.types';
 
-const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24h
-const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1h
+
 
 interface UserRecord {
   id: string;
@@ -87,23 +77,18 @@ const createSession = async (
 };
 
 export const registerUser = async (input: RegisterInput, meta: SessionMeta) => {
-  const existing = await findUserByEmail(input.email);
+  const existing = await findUserByUsername(input.username);
   if (existing) {
-    throw ApiError.conflict('An account with this email already exists');
+    throw ApiError.conflict('An account with this username already exists');
   }
 
   const hashedPassword = await hashPassword(input.password);
-  const { raw: verificationToken, hashed: hashedVerificationToken } = generateSecureToken();
 
   const user = await createUser({
-    email: input.email,
+    username: input.username,
     password: hashedPassword,
     name: input.name,
-    emailVerificationToken: hashedVerificationToken,
-    emailVerificationExpiry: new Date(Date.now() + VERIFICATION_TOKEN_TTL_MS),
   });
-
-  await sendVerificationEmail(user.email, verificationToken);
 
   const tokens = await createSession(user.id, user.email, user.role, meta);
 
@@ -111,18 +96,14 @@ export const registerUser = async (input: RegisterInput, meta: SessionMeta) => {
 };
 
 export const loginUser = async (input: LoginInput, meta: SessionMeta) => {
-  const user = await findUserByEmail(input.email);
+  const user = await findUserByUsername(input.username);
   if (!user) {
-    throw ApiError.unauthorized('Invalid email or password');
+    throw ApiError.unauthorized('Invalid username or password');
   }
 
   const isMatch = await comparePassword(input.password, user.password);
   if (!isMatch) {
-    throw ApiError.unauthorized('Invalid email or password');
-  }
-
-  if (env.requireEmailVerification && !user.isEmailVerified) {
-    throw ApiError.forbidden('Please verify your email before logging in');
+    throw ApiError.unauthorized('Invalid username or password');
   }
 
   const tokens = await createSession(user.id, user.email, user.role, meta);
@@ -179,59 +160,4 @@ export const getCurrentUser = async (userId: string): Promise<PublicUser> => {
     throw ApiError.notFound('User not found');
   }
   return toPublicUser(user);
-};
-
-export const verifyEmail = async (input: VerifyEmailInput): Promise<void> => {
-  const hashed = hashToken(input.token);
-  const user = await findUserByVerificationToken(hashed);
-
-  if (!user) {
-    throw ApiError.badRequest('Invalid or expired verification token');
-  }
-
-  await updateUser(user.id, {
-    isEmailVerified: true,
-    emailVerificationToken: null,
-    emailVerificationExpiry: null,
-  });
-};
-
-export const resendVerification = async (input: ResendVerificationInput): Promise<void> => {
-  const user = await findUserByEmail(input.email);
-  if (!user || user.isEmailVerified) return;
-
-  const { raw, hashed } = generateSecureToken();
-
-  await updateUser(user.id, {
-    emailVerificationToken: hashed,
-    emailVerificationExpiry: new Date(Date.now() + VERIFICATION_TOKEN_TTL_MS),
-  });
-
-  await sendVerificationEmail(user.email, raw);
-};
-
-export const forgotPassword = async (input: ForgotPasswordInput): Promise<void> => {
-  const user = await findUserByEmail(input.email);
-  if (!user) return;
-
-  const { raw, hashed } = generateSecureToken();
-
-  await updateUser(user.id, {
-    passwordResetToken: hashed,
-    passwordResetExpiry: new Date(Date.now() + RESET_TOKEN_TTL_MS),
-  });
-
-  await sendPasswordResetEmail(user.email, raw);
-};
-
-export const resetPassword = async (input: ResetPasswordInput): Promise<void> => {
-  const hashed = hashToken(input.token);
-  const user = await findUserByResetToken(hashed);
-
-  if (!user) {
-    throw ApiError.badRequest('Invalid or expired reset token');
-  }
-
-  const hashedPassword = await hashPassword(input.password);
-  await resetPasswordAndRevokeSessions(user.id, hashedPassword);
 };

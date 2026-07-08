@@ -14,7 +14,8 @@ const envSchema = z.object({
   JWT_REFRESH_EXPIRY: z.string().default('7d'),
   REFRESH_TOKEN_COOKIE_NAME: z.string().default('refresh_token'),
 
-  CLIENT_URL: z.string().default('http://localhost:3000'),
+  CLIENT_URL: z.string().default('http://localhost:5173'),
+  CLOUD_DATABASE_URL: z.string().optional().default(''),
 
   SMTP_HOST: z.string().optional().default(''),
   SMTP_PORT: z.string().optional().default('587'),
@@ -51,6 +52,7 @@ export const env = {
   },
 
   clientUrl: data.CLIENT_URL,
+  cloudDatabaseUrl: data.CLOUD_DATABASE_URL,
 
   smtp: {
     host: data.SMTP_HOST,

@@ -33,7 +33,7 @@ export const register = asyncHandler(async (req: Request, res: Response) => {
 
   res.status(201).json({
     success: true,
-    message: 'Account created. Please check your email to verify your address.',
+    message: 'Account created successfully.',
     data: { user, accessToken: tokens.accessToken },
   });
 });
@@ -90,31 +90,3 @@ export const me = asyncHandler(async (req: Request, res: Response) => {
   res.status(200).json({ success: true, data: { user } });
 });
 
-export const verifyEmail = asyncHandler(async (req: Request, res: Response) => {
-  await authService.verifyEmail(req.body);
-  res.status(200).json({ success: true, message: 'Email verified successfully' });
-});
-
-export const resendVerification = asyncHandler(async (req: Request, res: Response) => {
-  await authService.resendVerification(req.body);
-  res.status(200).json({
-    success: true,
-    message: 'If an account with that email exists and is unverified, a new link has been sent.',
-  });
-});
-
-export const forgotPassword = asyncHandler(async (req: Request, res: Response) => {
-  await authService.forgotPassword(req.body);
-  res.status(200).json({
-    success: true,
-    message: 'If an account with that email exists, a password reset link has been sent.',
-  });
-});
-
-export const resetPassword = asyncHandler(async (req: Request, res: Response) => {
-  await authService.resetPassword(req.body);
-  res.status(200).json({
-    success: true,
-    message: 'Password reset successfully. Please log in again.',
-  });
-});
